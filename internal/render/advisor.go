@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/pgrundev/pgbot/internal/advisor"
+	"github.com/pgrundev/pgbot/internal/model"
 )
 
 // AdvisorInput is everything the index-advisor report needs.
@@ -28,7 +29,7 @@ func AdvisorReport(w io.Writer, in AdvisorInput) {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "%s · %s · %s · %s\n\n",
-		st.head("index advisor"), st.head(in.Database), pgLower(in.VersionNum),
+		st.head("index advisor"), st.head(in.Database), model.PGVersionString(in.VersionNum),
 		st.dim("hypopg validation — nothing was built"))
 
 	if len(in.Recommendations) == 0 {

@@ -207,11 +207,3 @@ func computeHealthScore(c *model.Context) int {
 	}
 	return s
 }
-
-// pgLower renders "postgres 16.3" for the header.
-func pgLower(num int) string {
-	if num == 0 {
-		return "postgres"
-	}
-	return fmt.Sprintf("postgres %d.%d", num/10000, num%100)
-}

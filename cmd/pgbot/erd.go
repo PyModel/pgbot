@@ -8,6 +8,7 @@ import (
 
 	"github.com/pgrundev/pgbot/internal/conn"
 	"github.com/pgrundev/pgbot/internal/erd"
+	"github.com/pgrundev/pgbot/internal/model"
 	"github.com/spf13/cobra"
 )
 
@@ -41,7 +42,7 @@ func newERDCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			s.Info.Version = pgVersionShort(target.Caps.VersionNum)
+			s.Info.Version = model.PGVersionString(target.Caps.VersionNum)
 			switch {
 			case htmlOut:
 				fmt.Print(erd.RenderHTML(s))
