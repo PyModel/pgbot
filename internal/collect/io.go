@@ -41,6 +41,7 @@ func (ioCollector) Sample(ctx context.Context, t *conn.Target, caps conn.Capabil
 }
 
 func (ioCollector) Assemble(c *model.Context, _ conn.Capabilities, s sampled, dt time.Duration, _ Options) {
+	dt = s.rateWindow(dt) // rates are divided by THIS collector's measured span, not the shared window (N4)
 	a, aok := s.A.(ioSample)
 	b, bok := s.B.(ioSample)
 	if s.Err != nil || !aok || !bok {

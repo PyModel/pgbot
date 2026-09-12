@@ -95,7 +95,7 @@ func Run(ctx context.Context, t *conn.Target, opts Options) (*model.Context, err
 		g1.Go(func() error {
 			v, err := c.Sample(gctx, t, caps)
 			mu.Lock()
-			results[c.Name()] = &sampled{A: v, Err: err}
+			results[c.Name()] = &sampled{A: v, Err: err, AtA: nowUTC()}
 			mu.Unlock()
 			return nil
 		})
@@ -132,7 +132,12 @@ func Run(ctx context.Context, t *conn.Target, opts Options) (*model.Context, err
 		if hErr == nil {
 			hErr = hErrB
 		}
-		results[healthName] = &sampled{A: hA, B: hB, Err: hErr, OwnTxns: int64(ash.attempts - ash.failures)}
+		results[healthName] = &sampled{
+			A: hA, B: hB, Err: hErr,
+			AtA: tA, AtB: tB, Span: dt, // health's samples ARE the window
+			OwnTxns:     int64(ash.attempts - ash.failures),
+			OwnTxnFails: int64(ash.failures),
+		}
 	} else {
 		tB = nowUTC() // no window; newContext still needs a timestamp
 	}
@@ -154,6 +159,10 @@ func Run(ctx context.Context, t *conn.Target, opts Options) (*model.Context, err
 				results[c.Name()] = r
 			}
 			r.B = v
+			r.AtB = nowUTC()
+			if r.AtA != (time.Time{}) && r.AtB.After(r.AtA) {
+				r.Span = r.AtB.Sub(r.AtA)
+			}
 			if err != nil && r.Err == nil {
 				r.Err = err
 			}

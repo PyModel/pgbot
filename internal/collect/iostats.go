@@ -55,6 +55,7 @@ func (iostatsCollector) Sample(ctx context.Context, t *conn.Target, _ conn.Capab
 }
 
 func (iostatsCollector) Assemble(c *model.Context, caps conn.Capabilities, s sampled, dt time.Duration, _ Options) {
+	dt = s.rateWindow(dt) // rates are divided by THIS collector's measured span, not the shared window (N4)
 	if !caps.HasStatIO() {
 		c.IOStats = &model.IOStats{Section: model.Section{Exactness: model.ExactnessUnavailable, Reason: "pg_stat_io requires PostgreSQL 16+"}}
 		return

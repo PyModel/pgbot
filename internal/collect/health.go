@@ -61,6 +61,7 @@ func (healthCollector) Assemble(c *model.Context, _ conn.Capabilities, s sampled
 		c.Health = &model.Health{Section: unavail(s.Err, "pg_stat_database unavailable")}
 		return
 	}
+	dt = s.rateWindow(dt) // health's own span — identical to the window
 	h := &model.Health{Connections: int(b.Numbackends)}
 	reset := false
 	mark := func(v *float64, ok bool) *float64 {
@@ -70,17 +71,33 @@ func (healthCollector) Assemble(c *model.Context, _ conn.Capabilities, s sampled
 		}
 		return v
 	}
-	// pgbot's own commits inside the window (the wait sampler's polls) are not the
-	// database's throughput: take them off sample B's commit counter before
-	// computing rates. Clamped so a reset (b < a) is still detected as such (PR#1).
+	// pgbot's own transactions inside the window are not the database's
+	// workload: take them off sample B's counters before computing rates.
+	// Every one of pgbot's reads books a server transaction (implicit or
+	// explicit): the wait sampler's successful polls commit (OwnTxns), its
+	// failed polls — a timeout/cancel mid-query — abort and book a ROLLBACK
+	// (OwnTxnFails), and health's own sample-A query commits inside the window
+	// (+1). The rollback subtraction is best-effort: a poll that fails before a
+	// backend is acquired books nothing, but under-counting pgbot's rollbacks
+	// is strictly safer than leaving them in — the leak fired false
+	// high-rollback-ratio findings during exactly the lock storms that stall
+	// polls. Clamped so a reset (b < a) is still detected as such (PR#1).
 	commitsB := b.XactCommit
-	if own := s.OwnTxns; own > 0 && commitsB-own >= a.XactCommit {
+	ownCommits := s.OwnTxns
+	if s.Err == nil {
+		ownCommits++ // health's sample-A transaction (its commit lands inside [A, B])
+	}
+	if own := ownCommits; own > 0 && commitsB-own >= a.XactCommit {
 		commitsB -= own
 	}
-	h.TPS = mark(rate.PerSecond(a.XactCommit+a.XactRollback, commitsB+b.XactRollback, dt))
+	rollbacksB := b.XactRollback
+	if own := s.OwnTxnFails; own > 0 && rollbacksB-own >= a.XactRollback {
+		rollbacksB -= own
+	}
+	h.TPS = mark(rate.PerSecond(a.XactCommit+a.XactRollback, commitsB+rollbacksB, dt))
 	h.CommitsPerSec = mark(rate.PerSecond(a.XactCommit, commitsB, dt))
-	h.RollbacksPerSec = mark(rate.PerSecond(a.XactRollback, b.XactRollback, dt))
-	if rr, ok := rate.Ratio(a.XactRollback, b.XactRollback, a.XactCommit, commitsB); ok {
+	h.RollbacksPerSec = mark(rate.PerSecond(a.XactRollback, rollbacksB, dt))
+	if rr, ok := rate.Ratio(a.XactRollback, rollbacksB, a.XactCommit, commitsB); ok {
 		h.RollbackRatio = round4p(rr)
 	}
 	if chr, ok := rate.Ratio(a.BlksHit, b.BlksHit, a.BlksRead, b.BlksRead); ok {

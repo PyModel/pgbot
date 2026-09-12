@@ -68,10 +68,35 @@ type sampled struct {
 	A   any
 	B   any
 	Err error
-	// OwnTxns is how many transactions pgbot itself committed inside the sample
-	// window [A, B] — the wait sampler's successful polls. Only the health
-	// collector receives it, and subtracts it from the commit delta (PR#1).
-	OwnTxns int64
+	// Span is the MEASURED wall-clock time between this collector's own A and B
+	// samples — the divisor its rates deserve. Only health's samples bracket the
+	// runner window exactly; the other counters are sampled in phase 1 (before
+	// the window opens) and phase 2 (after it closes), so their true span is
+	// longer than the window, and dividing by the window would inflate every
+	// rate by that lead+lag — worst on short intervals and remote databases
+	// (bug_report.md N4). AtA/AtB are the raw stamps the runner fills; Span is
+	// their difference (health: exactly the window). Zero Span means unstamped
+	// (e.g. assembled without the runner); rateWindow falls back to the window.
+	AtA, AtB time.Time
+	Span     time.Duration
+	// OwnTxns / OwnTxnFails are how many transactions pgbot itself committed /
+	// aborted inside the sample window [A, B] — the wait sampler's successful
+	// and failed polls. Only the health collector receives them, and subtracts
+	// them from the commit/rollback deltas so pgbot never reports its own
+	// footprint as the database's workload (PR#1).
+	OwnTxns     int64
+	OwnTxnFails int64
+}
+
+// rateWindow is the divisor for this collector's rates: its own measured span
+// when the runner stamped one, else the runner window — and never a
+// non-positive interval (rate.PerSecond already refuses those, but callers
+// computing their own must not divide by zero).
+func (s sampled) rateWindow(fallback time.Duration) time.Duration {
+	if s.Span > 0 {
+		return s.Span
+	}
+	return fallback
 }
 
 // Collector reads one diagnostic domain and writes its section into the Context.
