@@ -120,7 +120,7 @@ func Load(explicit string) (*Config, error) {
 	// SECURITY (B2-1): refuse credentials before touching anything else.
 	if bad := firstForbidden(md); bad != "" {
 		return nil, fmt.Errorf(
-			"config %s contains a credential-shaped key %q — pgbot never reads a connection string or password from a config file, because this file is meant to be committed. Pass the connection via --dsn or the PGBOT_DSN environment variable instead",
+			"config %s contains a credential-shaped key %q — pgbot never reads a connection string or password from a config file, because this file is meant to be committed. Pass the connection string as the command's argument (e.g. `pgbot inspect \"host=… dbname=…\"`) or set $DATABASE_URL ($PGBOT_DATABASE_URL and $PGSERVICE are also honored)",
 			pth, bad)
 	}
 
