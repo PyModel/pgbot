@@ -1,7 +1,6 @@
 package erd
 
 import (
-	"sort"
 	"strings"
 )
 
@@ -16,26 +15,31 @@ func RenderASCIIRow(s Schema) string {
 	}
 
 	tables := append([]Table(nil), s.Tables...)
-	sort.Slice(tables, func(i, j int) bool { return tables[i].Name < tables[j].Name })
-	byName := map[string]*Table{}
+	sortTables(tables)
+	nv := s.nameView()
+	qedges := s.qualEdges()
+	// All placement maps are keyed by the QUALIFIED identity — a bare-name key
+	// collapses public.orders and analytics.orders onto one placement and routes
+	// the other schema's edges into the wrong box (bug_report.md N3).
+	byQual := map[string]*Table{}
 	for i := range tables {
-		byName[tables[i].Name] = &tables[i]
+		byQual[tables[i].Schema+"."+tables[i].Name] = &tables[i]
 	}
 
 	// Depth: roots (no FK out, or FK to unknown) at 0; a child sits one right
 	// of its deepest parent. Iterate to fixpoint; cycles keep their first depth.
 	depth := map[string]int{}
 	for _, t := range tables {
-		depth[t.Name] = 0
+		depth[t.Schema+"."+t.Name] = 0
 	}
 	for iter := 0; iter < len(tables); iter++ {
 		changed := false
-		for _, e := range s.Edges {
-			if _, ok := byName[e.FromTable]; !ok {
+		for _, e := range qedges {
+			if _, ok := byQual[e.from]; !ok {
 				continue
 			}
-			if d, ok := depth[e.ToTable]; ok && depth[e.FromTable] < d+1 {
-				depth[e.FromTable] = d + 1
+			if d, ok := depth[e.to]; ok && depth[e.from] < d+1 {
+				depth[e.from] = d + 1
 				changed = true
 			}
 		}
@@ -59,7 +63,7 @@ func RenderASCIIRow(s Schema) string {
 	for i := range tables {
 		t := &tables[i]
 		var b strings.Builder
-		writeTableBox(&b, *t)
+		writeTableBox(&b, *t, nv)
 		p := &placed{lines: strings.Split(strings.TrimRight(b.String(), "\n"), "\n"),
 			fkRowByColumn: map[string]int{}}
 		for ci, c := range t.Columns {
@@ -67,8 +71,8 @@ func RenderASCIIRow(s Schema) string {
 				p.fkRowByColumn[c.Name] = ci + 1 // relative to box top
 			}
 		}
-		cols[depth[t.Name]] = append(cols[depth[t.Name]], p)
-		pl[t.Name] = p
+		cols[depth[t.Schema+"."+t.Name]] = append(cols[depth[t.Schema+"."+t.Name]], p)
+		pl[t.Schema+"."+t.Name] = p
 	}
 
 	// Gutter lanes: one vertical track per edge in the gutter left of the
@@ -76,11 +80,11 @@ func RenderASCIIRow(s Schema) string {
 	const lanesPerGutter = 4
 	gutterW := make([]int, maxDepth+1) // gutter g sits left of column g (g>=1)
 	edgesInGutter := make([]int, maxDepth+2)
-	for _, e := range s.Edges {
-		if pl[e.FromTable] == nil || pl[e.ToTable] == nil {
+	for _, e := range qedges {
+		if pl[e.from] == nil || pl[e.to] == nil {
 			continue
 		}
-		edgesInGutter[depth[e.FromTable]]++
+		edgesInGutter[depth[e.from]]++
 	}
 	for g := 1; g <= maxDepth; g++ {
 		gutterW[g] = 4 + 2*minInt(edgesInGutter[g], lanesPerGutter)
@@ -135,25 +139,20 @@ func RenderASCIIRow(s Schema) string {
 	// `<` into the parent's right border. Only adjacent-column edges get a
 	// line; longer spans (and over-cap fan-ins) keep their textual FK marker.
 	laneUsed := map[int]int{} // gutter → lanes taken
-	edges := append([]Edge(nil), s.Edges...)
-	sort.Slice(edges, func(i, j int) bool {
-		if edges[i].ToTable != edges[j].ToTable {
-			return edges[i].ToTable < edges[j].ToTable
-		}
-		return edges[i].FromTable < edges[j].FromTable
-	})
+	edges := append([]qualEdge(nil), qedges...)
+	sortEdges(edges)
 	for _, e := range edges {
-		child, parent := pl[e.FromTable], pl[e.ToTable]
+		child, parent := pl[e.from], pl[e.to]
 		if child == nil || parent == nil {
 			continue
 		}
-		g := depth[e.FromTable]
-		if depth[e.ToTable] != g-1 || laneUsed[g] >= lanesPerGutter {
+		g := depth[e.from]
+		if depth[e.to] != g-1 || laneUsed[g] >= lanesPerGutter {
 			continue
 		}
 		lane := laneUsed[g]
 		laneUsed[g]++
-		fkRel, ok := child.fkRowByColumn[e.FromColumn]
+		fkRel, ok := child.fkRowByColumn[e.edge.FromColumn]
 		if !ok {
 			continue
 		}

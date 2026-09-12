@@ -3,7 +3,6 @@ package erd
 import (
 	"fmt"
 	"html"
-	"sort"
 	"strings"
 )
 
@@ -21,19 +20,23 @@ func RenderHTML(s Schema) string {
 	)
 
 	tables := append([]Table(nil), s.Tables...)
-	sort.Slice(tables, func(i, j int) bool { return tables[i].Name < tables[j].Name })
+	sortTables(tables)
+	qedges := s.qualEdges()
+	nv := s.nameView()
 
 	// Same layered layout as --layout row: parents left, children right.
+	// Keyed by qualified identity — bare keys collapse same-named tables from
+	// different schemas onto one placement (bug_report.md N3).
 	depth := map[string]int{}
 	known := map[string]bool{}
 	for _, t := range tables {
-		depth[t.Name], known[t.Name] = 0, true
+		depth[t.Schema+"."+t.Name], known[t.Schema+"."+t.Name] = 0, true
 	}
 	for range tables {
 		changed := false
-		for _, e := range s.Edges {
-			if known[e.FromTable] && known[e.ToTable] && depth[e.FromTable] < depth[e.ToTable]+1 {
-				depth[e.FromTable] = depth[e.ToTable] + 1
+		for _, e := range qedges {
+			if known[e.from] && known[e.to] && depth[e.from] < depth[e.to]+1 {
+				depth[e.from] = depth[e.to] + 1
 				changed = true
 			}
 		}
@@ -56,7 +59,7 @@ func RenderHTML(s Schema) string {
 		colW, y := 0.0, 0.0
 		var col []*Table
 		for i := range tables {
-			if depth[tables[i].Name] == d {
+			if depth[tables[i].Schema+"."+tables[i].Name] == d {
 				col = append(col, &tables[i])
 			}
 		}
@@ -83,12 +86,12 @@ func RenderHTML(s Schema) string {
 					b.fkY[c.Name] = y + titleH + float64(i)*rowH + rowH/2
 				}
 			}
-			boxes[t.Name] = b
+			boxes[t.Schema+"."+t.Name] = b
 			colW = maxFloat(colW, w)
 			y += b.h + boxGap
 		}
 		for _, t := range col {
-			boxes[t.Name].w = colW
+			boxes[t.Schema+"."+t.Name].w = colW
 		}
 		colX += colW + colGap
 	}
@@ -102,19 +105,14 @@ func RenderHTML(s Schema) string {
 	var svg strings.Builder
 	esc := html.EscapeString
 	// Edges first, under the boxes.
-	edges := append([]Edge(nil), s.Edges...)
-	sort.Slice(edges, func(i, j int) bool {
-		if edges[i].ToTable != edges[j].ToTable {
-			return edges[i].ToTable < edges[j].ToTable
-		}
-		return edges[i].FromTable < edges[j].FromTable
-	})
+	edges := append([]qualEdge(nil), qedges...)
+	sortEdges(edges)
 	for _, e := range edges {
-		child, parent := boxes[e.FromTable], boxes[e.ToTable]
+		child, parent := boxes[e.from], boxes[e.to]
 		if child == nil || parent == nil {
 			continue
 		}
-		y1, ok := child.fkY[e.FromColumn]
+		y1, ok := child.fkY[e.edge.FromColumn]
 		if !ok {
 			continue
 		}
@@ -126,7 +124,7 @@ func RenderHTML(s Schema) string {
 	}
 	for i := range tables {
 		t := &tables[i]
-		b := boxes[t.Name]
+		b := boxes[t.Schema+"."+t.Name]
 		fmt.Fprintf(&svg, `<g><rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="6" class="tbl"/>`+"\n", b.x, b.y, b.w, b.h)
 		fmt.Fprintf(&svg, `<text x="%.1f" y="%.1f" class="title">%s</text>`+"\n", b.x+padX, b.y+20, esc(t.Schema+"."+t.Name))
 		fmt.Fprintf(&svg, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="rule"/>`+"\n", b.x, b.y+titleH-2, b.x+b.w, b.y+titleH-2)
@@ -137,7 +135,7 @@ func RenderHTML(s Schema) string {
 				svg.WriteString(` <tspan class="pk">PK</tspan>`)
 			}
 			if c.FKTarget != "" {
-				fmt.Fprintf(&svg, ` <tspan class="fk">FK → %s</tspan>`, esc(c.FKTarget))
+				fmt.Fprintf(&svg, ` <tspan class="fk">FK → %s</tspan>`, esc(fkDisplay(c.FKTarget, nv)))
 			}
 			svg.WriteString(`</text>` + "\n")
 		}
