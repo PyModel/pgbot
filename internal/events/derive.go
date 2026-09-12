@@ -5,6 +5,7 @@ package events
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,6 +76,16 @@ func schemaEvents(prev, cur []model.SchemaObject, window func(model.Event) model
 			out = append(out, window(model.Event{Kind: dropped(p.Kind), Object: p.Identity, Before: p.Definition}))
 		}
 	}
+	// Deterministic order (map iteration is not): events feed the report, the
+	// stored snapshot and the AI payload, and two runs over identical state must
+	// produce byte-identical output. (Kind, Object) is a total order here — each
+	// object emits at most one event.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		return out[i].Object < out[j].Object
+	})
 	return out
 }
 
@@ -98,6 +109,9 @@ func configEvents(prev, cur map[string]string, window func(model.Event) model.Ev
 			out = append(out, window(model.Event{Kind: "config.changed", Object: name, Before: redact(name, pv)}))
 		}
 	}
+	// Deterministic order (map iteration is not): config events land in the
+	// same order in the report, the stored snapshot and the AI payload.
+	sort.Slice(out, func(i, j int) bool { return out[i].Object < out[j].Object })
 	return out
 }
 
