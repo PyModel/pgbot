@@ -94,11 +94,19 @@ func Introspect(ctx context.Context, q Querier, schemaFilter string) (Schema, er
 		if err := rows.Scan(&fs, &ft, &fc, &ts, &tt, &tc); err != nil {
 			return s, err
 		}
-		s.Edges = append(s.Edges, Edge{FromTable: ft, FromColumn: fc, ToTable: tt, ToColumn: tc})
+		// The schemas ride along on the edge — they are the edge's identity. A
+		// bare From/ToTable cannot distinguish public.orders from analytics.orders
+		// and used to route the rendered line to whichever box registered last.
+		s.Edges = append(s.Edges, Edge{
+			FromSchema: fs, FromTable: ft, FromColumn: fc,
+			ToSchema: ts, ToTable: tt, ToColumn: tc,
+		})
 		if t := byTable[fs+"."+ft]; t != nil {
 			for i := range t.Columns {
 				if t.Columns[i].Name == fc {
-					t.Columns[i].FKTarget = tt + "." + tc
+					// Qualified target: schema.table.column. Bare "table.column"
+					// cannot say WHICH same-named table the FK points at.
+					t.Columns[i].FKTarget = ts + "." + tt + "." + tc
 				}
 			}
 		}

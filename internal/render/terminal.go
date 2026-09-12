@@ -82,7 +82,7 @@ func Terminal(w io.Writer, c *model.Context, opts Options) error {
 		target = opts.Host
 	}
 	fmt.Fprintf(&b, "%s · %s · %s · %s · %s window\n\n",
-		st.good("connected"), st.head(target), pgLower(c.Server.VersionNum), st.dim("read-only"), windowLabel(c))
+		st.good("connected"), st.head(target), c.Server.ShortVersion(), st.dim("read-only"), windowLabel(c))
 
 	// --profile=schema: state plainly that this is a schema check, so a clean
 	// report is never mistaken for "this running database is healthy" (D3-1). A

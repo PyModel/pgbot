@@ -118,6 +118,54 @@ func TestWaitStudyTwoObservationsNeedLockShare(t *testing.T) {
 	}
 }
 
+// Victim LockShare (model 1.1.0) is the fraction of THE VICTIM'S OWN samples
+// spent in Lock — not its share of the whole window. A victim seen in 4 of 200
+// window samples, all four blocked, must carry 1.0 (100%), not 0.02 — the waits
+// report prints it as "~% of its sampled time in Lock" (bug_report.md Bug 5).
+func TestWaitStudyVictimLockShareIsPerVictim(t *testing.T) {
+	in := WaitStudyInput{
+		Fast: ashResult{samples: []WaitSample{
+			// Victim 18442: blocked in all 4 of ITS samples.
+			lockSample(18442, "transactionid"), lockSample(18442, "transactionid"),
+			lockSample(18442, "transactionid"), lockSample(18442, "transactionid"),
+			lockSample(7, "relation"),
+		}, attempts: 1, span: time.Second},
+		Snapshots: []LockSnapshot{
+			{Edges: []LockEdge{edge(18442, 8172, 10)}},
+			{Edges: []LockEdge{edge(18442, 8172, 11)}},
+			{Edges: []LockEdge{edge(18442, 8172, 12)}},
+		},
+		HasPgMonitor: true,
+	}
+	// Filler traffic from other backends so the victim is a small fraction of
+	// the WINDOW — 4 of 200 samples = 0.02 window share — while the victim's OWN
+	// sampled-time share stays 1.0. The two numbers the old code conflated.
+	for i := 0; i < 195; i++ {
+		in.Fast.samples = append(in.Fast.samples, cpuSample(int32(100+i%20)))
+	}
+	s := BuildWaitStudy(in)
+	if len(s.Blockers) != 1 || len(s.Blockers[0].Victims) != 1 {
+		t.Fatalf("expected one sustained blocker with one victim: %+v", s.Blockers)
+	}
+	v := s.Blockers[0].Victims[0]
+	if v.PID != 18442 || v.LockShare != 1.0 {
+		t.Errorf("victim LockShare = %v for pid %d, want 1.0 for pid 18442 (blocked every time it was sampled)", v.LockShare, v.PID)
+	}
+	// The window share must stay what it is — the fix must not touch it.
+	var sess *model.SessionWaits
+	for i := range s.Sessions {
+		if s.Sessions[i].PID == 18442 {
+			sess = &s.Sessions[i]
+		}
+	}
+	if sess == nil || sess.Share >= 1.0 {
+		t.Errorf("window share must remain the small fraction (4/200), got %+v", sess)
+	}
+	if sess != nil && sess.Share > 0.05 {
+		t.Errorf("victim window share = %v, want ≈0.02 — the filler must dilute the window but not the victim's own share", sess.Share)
+	}
+}
+
 // An idle database is a real result (zero AAS, no blockers), distinct from a
 // broken sampler (all polls failed → profile unavailable with a reason).
 func TestWaitStudyIdleVsBroken(t *testing.T) {

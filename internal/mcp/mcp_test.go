@@ -158,3 +158,30 @@ func TestServe_toolErrorIsResultNotTransportError(t *testing.T) {
 		t.Error("tool failure result should have isError=true")
 	}
 }
+
+// JSON-RPC 2.0 §5.1: the server MUST NOT reply to a Notification — a request
+// whose id member is absent — for ANY method, not just the notifications/*
+// namespace. Before the responder refactor, a notification-form initialize /
+// ping / tools/list / tools/call / prompts/get / resources/read still got a
+// reply with "id": null, and a notification-form tools/call executed the tool
+// and then answered (bug_report.md Bug 7). Processing a notification is fine
+// (fire-and-forget); answering it is the protocol violation.
+func TestServe_neverRepliesToNotifications(t *testing.T) {
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","method":"ping"}`,
+		`{"jsonrpc":"2.0","method":"tools/list"}`,
+		`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"echo","arguments":{"x":1}}}`,
+		`{"jsonrpc":"2.0","method":"prompts/get","params":{"name":"nope"}}`,
+		`{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"nope"}}`,
+		`{"jsonrpc":"2.0","method":"bogus/method"}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := testServer().Serve(context.Background(), strings.NewReader(in), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("notification-form requests must produce zero output, got:\n%s", out.String())
+	}
+}

@@ -56,6 +56,7 @@ func (walCollector) Sample(ctx context.Context, t *conn.Target, _ conn.Capabilit
 }
 
 func (walCollector) Assemble(c *model.Context, caps conn.Capabilities, s sampled, dt time.Duration, _ Options) {
+	dt = s.rateWindow(dt) // rates are divided by THIS collector's measured span, not the shared window (N4)
 	if !caps.HasStatWAL() {
 		c.WAL = &model.WAL{Section: model.Section{Exactness: model.ExactnessUnavailable, Reason: "pg_stat_wal requires PostgreSQL 14+"}}
 		return

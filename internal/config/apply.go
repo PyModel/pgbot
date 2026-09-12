@@ -205,8 +205,14 @@ func (c *Config) ExpiredFindings(now time.Time) []model.Finding {
 		if obj != "" {
 			obj = " (" + obj + ")"
 		}
+		// Object is the rule's full identity INCLUDING its expiry: more than one
+		// rule can expire in the same run, and every suppression_expired finding
+		// becomes its own Prometheus series keyed by (id, object, …) — identical
+		// Objects would produce duplicate label sets and an INVALID exposition
+		// (bug_report.md N5).
 		out = append(out, model.Finding{
 			ID: "suppression_expired", Severity: model.SeverityInfo,
+			Object:      fmt.Sprintf("%s%s expires=%s", r.Finding, obj, r.Expires),
 			Title:       fmt.Sprintf("suppression for %s%s expired on %s", r.Finding, obj, r.Expires),
 			Detail:      "This [[ignore]] rule's expires date has passed, so it no longer suppresses anything and the finding it muted will surface again. Suppressions are meant to be revisited, not left forever.",
 			Remediation: "Confirm the underlying issue is resolved and delete the rule, or renew its `expires` date if it still applies.",

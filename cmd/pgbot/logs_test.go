@@ -79,17 +79,39 @@ func TestIsSelfLogEntry(t *testing.T) {
 }
 
 // The authenticated-phase line carries only the role identity; pgbot's own
-// role authenticating is still pgbot's footprint.
+// role authenticating is still pgbot's footprint — but ONLY when the entry's
+// timestamp proves it can be pgbot's: entries predating pgbot's session (or
+// within the skew guard) are another client's evidence and must survive
+// (bug_report.md minor: the filter used to drop every client of the role).
 func TestIsSelfConnUser(t *testing.T) {
 	own := map[int]bool{}
-	e := pglog.Entry{Message: `connection authenticated: identity="pgbot_ro" method=scram-sha-256 (pg_hba.conf:128)`}
-	if !isSelfLogEntryForUser(e, own, "pgbot_ro") {
-		t.Error("own role's authenticated line must be filtered")
+	now := time.Now()
+	auth := func(at time.Time) pglog.Entry {
+		return pglog.Entry{Time: at, Message: `connection authenticated: identity="pgbot_ro" method=scram-sha-256 (pg_hba.conf:128)`}
 	}
-	if isSelfLogEntryForUser(e, own, "app") {
+	// pgbot's own line: comfortably after its session started (past the skew
+	// guard).
+	if !isSelfLogEntryForUser(auth(now.Add(5*time.Minute)), own, "pgbot_ro", now) {
+		t.Error("own role's authenticated line after session start must be filtered")
+	}
+	// Another role's line: kept regardless of time.
+	if isSelfLogEntryForUser(auth(now.Add(5*time.Minute)), own, "app", now) {
 		t.Error("another role's authenticated line must be kept")
 	}
-	if isSelfLogEntryForUser(pglog.Entry{Message: "some pgbot_ro mention elsewhere"}, own, "pgbot_ro") {
+	// Same role, but authenticated BEFORE pgbot started — another client's
+	// evidence: kept.
+	if isSelfLogEntryForUser(auth(now.Add(-time.Hour)), own, "pgbot_ro", now) {
+		t.Error("pre-session authenticated line must be kept — it is not pgbot's")
+	}
+	// Same role inside the skew guard — kept (when in doubt, keep evidence).
+	if isSelfLogEntryForUser(auth(now.Add(time.Minute)), own, "pgbot_ro", now.Add(10*time.Minute)) {
+		t.Error("entries inside the skew guard must be kept")
+	}
+	// Zero session clock: never drop on a guess.
+	if isSelfLogEntryForUser(auth(now.Add(time.Hour)), own, "pgbot_ro", time.Time{}) {
+		t.Error("without a session clock the line must be kept")
+	}
+	if isSelfLogEntryForUser(pglog.Entry{Time: now, Message: "some pgbot_ro mention elsewhere"}, own, "pgbot_ro", now) {
 		t.Error("only the authenticated-phase line matches, not any mention of the role")
 	}
 }

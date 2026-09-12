@@ -1,12 +1,55 @@
 package main
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pgrundev/pgbot/internal/model"
+	"github.com/pgrundev/pgbot/internal/render"
 )
+
+// captureStdout runs fn with stdout redirected and returns what it printed.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	return string(out)
+}
+
+// The blocker's victim line must print the victim's OWN sampled-time lock
+// fraction (model 1.1.0 LockShare), never its share of the whole window — a
+// backend blocked every time it was sampled reads ~100%, regardless of how
+// busy the rest of the database was (bug_report.md Bug 5).
+func TestRenderBlockerVictimShare(t *testing.T) {
+	b := model.Blocker{
+		HolderPID: 8172, HolderState: "idle in transaction", HolderXactAgeS: 43,
+		Observations: 5, Sustained: true,
+		Victims: []model.BlockedVictim{{
+			PID: 18442, WaitEvent: "transactionid", MaxWaitS: 12, LockShare: 1.0,
+			Query: "UPDATE orders SET status = 'paid' WHERE id = 42",
+		}},
+	}
+	out := captureStdout(t, func() { renderBlocker(render.NewStyler(false), b) })
+	if !strings.Contains(out, "~100% of its sampled time in Lock:transactionid") {
+		t.Errorf("victim line must print the per-victim lock share, got:\n%s", out)
+	}
+	b.Victims[0].LockShare = 0 // unattributed victim: no line, never a fabricated number
+	out = captureStdout(t, func() { renderBlocker(render.NewStyler(false), b) })
+	if strings.Contains(out, "of its sampled time") {
+		t.Errorf("a victim with no fast-plane samples must not get a share line:\n%s", out)
+	}
+}
 
 func TestClampWaits(t *testing.T) {
 	d, hz := clampWaits(10*time.Second, 10)

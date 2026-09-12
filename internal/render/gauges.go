@@ -16,7 +16,7 @@ import (
 // why, instead of showing an empty bar that looks like zero.
 //
 //	cache hit  [████████████████████]  99.2%     ok
-//	lock wait  [████████████░░░░░░░░]  61.0%     query 4f2a
+//	lock wait  [████████████░░░░░░░░]  61.0%     query 8001
 //	rollbacks  [██░░░░░░░░░░░░░░░░░░]  12.0%     watch
 //	idle idx   [██████░░░░░░░░░░░░░░]  43.0 GiB  review
 //
@@ -30,7 +30,7 @@ type gauge struct {
 	label      string
 	share      float64 // bar fill, 0..1
 	value      string  // "99.4%", "43.0 GiB", or "—"
-	status     string  // "ok", "low", "watch", "review", "query 4f2a", "2 blocked", or why it is not measurable
+	status     string  // "ok", "low", "watch", "review", "query 8001", "2 blocked", or why it is not measurable
 	kind       statusKind
 	measurable bool
 }
@@ -92,9 +92,13 @@ func cacheHitGauge(c *model.Context) gauge {
 }
 
 // lockWaitGauge: the Lock bucket's share of sampled active time, from the wait
-// profile. With blocked sessions the status names the culprit — the query
-// with the highest lock share — or falls back to the blocked count when
-// attribution is missing. Without a wait profile only the status is shown.
+// profile. With blocked sessions the status names the culprit — the query with
+// the most Lock-wait SAMPLES (LockShare × Count), selected by topLockQuery so
+// the strip and the waits profile below it use the SAME selection rule and
+// always name the same query (regression: the gauge used to rank raw LockShare
+// and print a different culprit than the profile) — or falls back to the
+// blocked count when attribution is missing. Without a wait profile only the
+// status is shown.
 func lockWaitGauge(c *model.Context) gauge {
 	wp := c.WaitProfile
 	profiled := wp != nil && wp.Available
@@ -122,24 +126,15 @@ func lockWaitGauge(c *model.Context) gauge {
 	g.kind = kBad
 	g.status = fmt.Sprintf("%d blocked", blocked)
 	if profiled {
-		best := -1.0
-		var culprit int64
-		for _, q := range wp.ByQuery {
-			if q.LockShare > best && q.LockShare > 0 {
-				best, culprit = q.LockShare, q.QueryID
-			}
-		}
-		if best > 0 {
-			g.status = "query " + queryHex4(culprit)
+		// Same ranking and handle as the waits profile: topLockQuery by
+		// LockShare×Count, queryTag's low-16 hex handle. The old code printed
+		// the HIGH 16 bits (queryHex4), an id that matched nothing else in the
+		// report (bug_report.md Bug 1).
+		if top := topLockQuery(wp); top != nil && top.LockShare > 0 {
+			g.status = "query " + queryTag(top.QueryID)
 		}
 	}
 	return g
-}
-
-// queryHex4 is the first four hex digits of a query_id — enough to find it in
-// `pgbot queries` / pg_stat_statements without eating the row.
-func queryHex4(id int64) string {
-	return fmt.Sprintf("%016x", uint64(id))[:4]
 }
 
 // rollbacksGauge: the rollback ratio over the sample window, graded by the

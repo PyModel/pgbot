@@ -259,3 +259,72 @@ func TestFormatters_smallValuesKeepPrecision(t *testing.T) {
 		}
 	}
 }
+
+// zeroBaselineHistory: a query that appears in the window already costing 8ms
+// per call after costing ~nothing before (interval means 0,0,0,8,8). The
+// detector passes it by design ("0 to anything is the strongest shift there
+// is"); the chain must SAY that and RANK at the top — not print "slowed 0.0×"
+// with impact 0 (bug_report.md N1).
+func zeroBaselineHistory() []Sample {
+	return history(6, func(i int, c *model.Context) {
+		calls := int64(1000 * (i + 1))
+		var totalMS float64
+		if i < 3 {
+			totalMS = 0 // ~0ms per call before the change
+		} else {
+			totalMS = 8 * float64(calls) // 8ms per call after
+		}
+		c.Queries = &model.Queries{Enabled: true, TotalExecMS: totalMS, Top: []model.QueryStat{{
+			QueryID: 7, Query: "SELECT count(*) FROM events WHERE status = $1",
+			Calls: calls, TotalMS: totalMS, MeanMS: totalMS / float64(calls),
+		}}}
+	})
+}
+
+func TestAnalyze_zeroBaselineShift(t *testing.T) {
+	r := Analyze(zeroBaselineHistory(), nil, Options{})
+	if len(r.Chains) != 1 {
+		t.Fatalf("expected exactly one chain, got %d: %+v", len(r.Chains), r.Chains)
+	}
+	ch := r.Chains[0]
+
+	// Text: states the ~0 → real cost fact; never the nonsense "slowed 0.0×".
+	if strings.Contains(ch.Symptom.Text, "0.0×") {
+		t.Errorf("zero-baseline shift must not print \"slowed 0.0×\": %q", ch.Symptom.Text)
+	}
+	if !strings.Contains(ch.Symptom.Text, "went from ~0ms to ") {
+		t.Errorf("symptom must say it went from ~0ms to a real cost: %q", ch.Symptom.Text)
+	}
+	if ch.Symptom.Before != 0 || ch.Symptom.After <= 0 {
+		t.Errorf("hop numbers must stay honest (0 → positive), got %+v", ch.Symptom)
+	}
+
+	// Ranking: a second query with a mild finite slowdown must NOT outrank the
+	// zero-baseline one at similar share. Build that pair directly.
+	both := history(6, func(i int, c *model.Context) {
+		calls := int64(1000 * (i + 1))
+		var tot7, tot9 float64
+		if i < 3 {
+			tot9 = 8 * float64(calls)
+		} else {
+			tot7 = 8 * float64(calls)
+			tot9 = 13 * float64(calls) // 8ms → 13ms = 1.625×
+		}
+		c.Queries = &model.Queries{Enabled: true, TotalExecMS: tot7 + tot9, Top: []model.QueryStat{
+			{QueryID: 7, Query: "SELECT count(*) FROM events WHERE status = $1",
+				Calls: calls, TotalMS: tot7, MeanMS: tot7 / float64(calls)},
+			{QueryID: 9, Query: "SELECT * FROM users WHERE id = $1",
+				Calls: calls, TotalMS: tot9, MeanMS: tot9 / float64(calls)},
+		}}
+	})
+	rr := Analyze(both, nil, Options{})
+	if len(rr.Chains) != 2 {
+		t.Fatalf("expected two chains, got %d", len(rr.Chains))
+	}
+	if rr.Chains[0].Symptom.Before == 0 && rr.Chains[1].Symptom.Before == 0 {
+		t.Fatal("fixture lost its finite-ratio chain")
+	}
+	if rr.Chains[0].Symptom.Before != 0 {
+		t.Errorf("zero-baseline chain must rank FIRST, got %q above it", rr.Chains[0].Symptom.Text)
+	}
+}

@@ -107,13 +107,33 @@ func PrometheusAll(w io.Writer, contexts []*model.Context) error {
 }
 
 // promFamily accumulates the samples of one metric family so its # HELP/# TYPE
-// header can be written exactly once, ahead of every sample.
+// header can be written exactly once, ahead of every sample. The Prometheus
+// text format forbids two samples of one family with the SAME label set — a
+// scrape that sees one rejects the entire file — so add refuses the second
+// occurrence of a label set: exposition VALIDITY is the hard contract, and a
+// dropped duplicate (zero information loss — identical labels mean identical
+// finding identity) is strictly better than losing every pgbot metric.
 type promFamily struct {
 	name, help, typ string
 	samples         []string
+	seen            map[string]bool // label sets already emitted
 }
 
-func (f *promFamily) add(sample string) { f.samples = append(f.samples, sample) }
+func (f *promFamily) add(sample string) {
+	key := labelKey(sample)
+	if f.seen[key] {
+		return
+	}
+	if f.seen == nil {
+		f.seen = map[string]bool{}
+	}
+	f.seen[key] = true
+	f.samples = append(f.samples, sample)
+}
+
+// labelKey extracts the identity the text format requires to be unique:
+// "name{labels}". Samples here are always label-carrying; a bare sample is
+// keyed by its metric name alone.
 
 // set writes one plain database-labelled gauge sample. db arrives already
 // escaped by esc; wrapping it in %q would escape it a second time.
@@ -145,6 +165,35 @@ func esc(s string) string {
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	s = strings.ReplaceAll(s, "\n", `\n`)
 	return s
+}
+
+// labelKey returns the unique-identity part of a sample line: the metric
+// name plus its label block. The block ends at the first UNQUOTED '}' — a
+// label value may legally contain braces, and cutting at the first '}' would
+// split mid-value (making the key wrong, not just ugly).
+func labelKey(sample string) string {
+	brace := strings.IndexByte(sample, '{')
+	if brace < 0 {
+		if i := strings.IndexByte(sample, ' '); i >= 0 {
+			return sample[:i]
+		}
+		return sample
+	}
+	inQuote, escaped := false, false
+	for i := brace; i < len(sample); i++ {
+		c := sample[i]
+		switch {
+		case escaped:
+			escaped = false
+		case c == '\\':
+			escaped = true
+		case c == '"':
+			inQuote = !inQuote
+		case c == '}' && !inQuote:
+			return sample[:i+1]
+		}
+	}
+	return sample
 }
 
 func boolLabel(v bool) string {

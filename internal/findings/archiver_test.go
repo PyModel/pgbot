@@ -155,3 +155,61 @@ func TestWalArchiving_stalledRespectsArchiveTimeout(t *testing.T) {
 		t.Error("archive_timeout=5min: 2h without an archive exceeds the 1h floor, must fire")
 	}
 }
+
+// Never-archived server (regression, bug_report.md Bug 4): archive_mode on, WAL
+// flowing, last_archived_time NULL and no failure recorded — the signature of an
+// archive_command that HANGS rather than returns. Neither the failing arm (needs
+// a failure signal) nor the stalled arm (needs a success timestamp) can fire, so
+// this state used to pass in silence while pg_wal filled.
+func TestWalArchiving_neverArchived(t *testing.T) {
+	flow := 2048.0
+	up := int64(3 * time.Hour.Seconds()) // older than the 1h floor
+	mk := func() *model.Context {
+		return &model.Context{
+			Server:   model.ServerInfo{UptimeSeconds: up},
+			Archiver: &model.Archiver{FailedCount: 0}, // last_archived_time NULL, never failed
+			WAL:      &model.WAL{BytesPerSec: &flow},
+			Settings: &model.Settings{Params: map[string]string{"archive_mode": "on"}},
+		}
+	}
+	f := has(Compute(mk()), "archiving_stalled")
+	if f == nil {
+		t.Fatal("hung archive_command on a never-archived server must fire archiving_stalled")
+	}
+	if f.Severity != model.SeverityCritical {
+		t.Errorf("severity = %s, want critical", f.Severity)
+	}
+	if !strings.Contains(f.Title, "never succeeded") {
+		t.Errorf("title should say this is a never-archived state: %q", f.Title)
+	}
+
+	// A server younger than the threshold hasn't had time to archive yet.
+	young := mk()
+	young.Server.UptimeSeconds = int64(10 * time.Minute.Seconds())
+	if has(Compute(young), "archiving_stalled") != nil {
+		t.Error("a server younger than the stall threshold must not fire")
+	}
+
+	// A recent pg_stat_reset NULLs last_archived_time too — must not be read as
+	// "never archived".
+	reset := mk()
+	recent := time.Now().Add(-10 * time.Minute)
+	reset.Window.StatsResetAt = &recent
+	if has(Compute(reset), "archiving_stalled") != nil {
+		t.Error("a recent stats reset must not be misread as never-archived")
+	}
+
+	// No WAL flowing → nothing to archive → silence.
+	idle := mk()
+	idle.WAL.BytesPerSec = nil
+	if has(Compute(idle), "archiving_stalled") != nil {
+		t.Error("no WAL flowing means nothing to archive — must stay silent")
+	}
+
+	// archive_mode off takes the archiving_disabled path instead.
+	off := mk()
+	off.Settings.Params["archive_mode"] = "off"
+	if has(Compute(off), "archiving_stalled") != nil {
+		t.Error("archive_mode=off must not fire the stall finding")
+	}
+}

@@ -86,7 +86,9 @@ func sarifLevel(sev string) string {
 }
 
 // securityScore gives GitHub a 0–10 severity it sorts by (critical=9, warn=5.5,
-// info=2), from the finding's Impact where present.
+// info=2), mapped from the finding's CLASS — Impact scores are not comparable
+// across dimensions (a risk-95 and a cost-5 finding are both "info" to a
+// security scanner), so severity is the only honest basis.
 func securityScore(f *model.Finding) string {
 	switch f.Severity {
 	case model.SeverityCritical:

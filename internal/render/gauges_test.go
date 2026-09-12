@@ -20,9 +20,14 @@ func gaugeContext() *model.Context {
 	c.WaitProfile = &model.WaitProfile{
 		Available: true, Samples: 100, WindowSeconds: 10,
 		Buckets: []model.WaitBucket{{Type: "Lock", Count: 61, Share: 0.61}, {Type: "CPU", Count: 39, Share: 0.39}},
+		// The two rankings deliberately disagree: the first query owns the most
+		// Lock SAMPLES (0.50×100 = 50) while the second has the higher raw
+		// LockShare (0.90 of its own 3 samples). The gauge must name the first —
+		// the same query the waits profile's topLockQuery names (Bug 2), via the
+		// low-16 handle both surfaces share (Bug 1).
 		ByQuery: []model.QueryWaits{
-			{QueryID: 0x1111000000000000, Count: 30, Share: 0.3, LockShare: 0.2},
-			{QueryID: 0x4f2a000000000000, Count: 40, Share: 0.4, LockShare: 0.9},
+			{QueryID: 0x11119c3d1e2b8001, Count: 100, Share: 0.45, LockShare: 0.50},
+			{QueryID: 0x4f2a00000000abcd, Count: 3, Share: 0.02, LockShare: 0.90},
 		},
 	}
 	c.Tables = &model.Tables{DBSizeBytes: 100 << 30}
@@ -76,8 +81,21 @@ func TestGauge_cacheHit(t *testing.T) {
 func TestGauge_lockWait(t *testing.T) {
 	c := gaugeContext()
 	g := lockWaitGauge(c)
-	if g.value != "61.0%" || g.share != 0.61 || g.status != "query 4f2a" || g.kind != kBad {
+	if g.value != "61.0%" || g.share != 0.61 || g.status != "query 8001" || g.kind != kBad {
 		t.Errorf("blocked with attribution should name the culprit: %+v", g)
+	}
+	// The gauge and the waits profile must agree on BOTH the culprit (most Lock
+	// samples, not highest raw share — Bug 2) and the handle encoding (low 16
+	// bits — Bug 1): the strip's "query XXXX" must be findable in the profile.
+	top := topLockQuery(c.WaitProfile)
+	if top == nil || top.QueryID != 0x11119c3d1e2b8001 {
+		t.Fatalf("topLockQuery disagrees with the fixture: %+v", top)
+	}
+	if got, want := g.status, "query "+queryTag(top.QueryID); got != want {
+		t.Errorf("gauge status %q must equal the profile's handle %q", got, want)
+	}
+	if strings.Contains(g.status, "abcd") || strings.Contains(g.status, "4f2a") {
+		t.Errorf("gauge named the high-share/few-sample decoy or a high-16 handle: %q", g.status)
 	}
 	c.WaitProfile.ByQuery = nil
 	if g := lockWaitGauge(c); g.status != "2 blocked" || g.kind != kBad {
@@ -158,7 +176,7 @@ func TestGaugeStrip_layoutNoColorAndWidth(t *testing.T) {
 	}
 	want := []string{
 		"  cache hit  [████████████████████]  99.4%     ok",
-		"  lock wait  [████████████░░░░░░░░]  61.0%     query 4f2a",
+		"  lock wait  [████████████░░░░░░░░]  61.0%     query 8001",
 		"  rollbacks  [██░░░░░░░░░░░░░░░░░░]  12.0%     watch",
 		"  idle idx   [█████████░░░░░░░░░░░]  43.0 GiB  review",
 	}
@@ -177,7 +195,7 @@ func TestGaugeStrip_layoutNoColorAndWidth(t *testing.T) {
 	// Colour on: the block characters survive so the bar reads with color stripped.
 	b.Reset()
 	renderGauges(&b, styler{on: true}, gaugeContext(), 80)
-	if !strings.Contains(b.String(), "█") || !strings.Contains(b.String(), "query 4f2a") {
+	if !strings.Contains(b.String(), "█") || !strings.Contains(b.String(), "query 8001") {
 		t.Error("colored strip lost its bar or status")
 	}
 }

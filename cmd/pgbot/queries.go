@@ -73,7 +73,7 @@ func runQueries(cmd *cobra.Command, args []string, f inspectFlags, byCalls bool)
 		label = "by call count"
 	}
 
-	fmt.Printf("%s · %s · top %d queries %s\n\n", st.Head(host), pgVersionShort(c.Server.VersionNum), len(top), st.Dim(label))
+	fmt.Printf("%s · %s · top %d queries %s\n\n", st.Head(host), c.Server.ShortVersion(), len(top), st.Dim(label))
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "  total\tshare\tcalls\tmean\tquery")
 	for _, q := range top {

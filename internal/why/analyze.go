@@ -69,6 +69,14 @@ const minSamples = 3
 // planner-flip antecedent for a seq-scan surge.
 const growthAntecedentPct = 0.10
 
+// zeroBaselineScore is the ranking score assigned to a 0 → X shift. The true
+// ratio is unbounded (any positive After over a zero Before); a finite,
+// documented ceiling keeps the impact sort meaningful — it dominates any
+// realistic measured ratio at equal share (a 1000× slowdown is as actionable
+// as an unbounded one), while a query with vastly larger share can still
+// outrank it.
+const zeroBaselineScore = 1000.0
+
 // Analyze computes causal chains from snapshot history and persisted events.
 // Deterministic: same samples, same report.
 func Analyze(samples []Sample, events []model.Event, opts Options) Report {
@@ -134,16 +142,29 @@ func querySlowdownChains(samples []Sample, events []model.Event) []Chain {
 		if shift == nil {
 			continue
 		}
+		// A zero baseline (Before == 0) passes the detector by design — "0 to
+		// anything is the strongest shift there is" — but the ratio itself is
+		// unbounded. Say so in the symptom text and score it with the documented
+		// ceiling instead of printing "slowed 0.0×" with impact 0 (which ranked
+		// the strongest regression the detector can emit LAST — bug_report.md N1).
+		zeroBaseline := shift.Before <= 0
 		ratio := 0.0
-		if shift.Before > 0 {
+		if zeroBaseline {
+			ratio = zeroBaselineScore
+		} else {
 			ratio = shift.After / shift.Before
+		}
+		symptomText := fmt.Sprintf("query %d (%s) slowed %.1f× — mean %s → %s per call since %s",
+			qid, compactQuery(text), ratio, ms(shift.Before), ms(shift.After), shift.At.Format("Jan 2 15:04"))
+		if zeroBaseline {
+			symptomText = fmt.Sprintf("query %d (%s) went from ~%s to %s per call since %s — used to cost nothing, now costs real time",
+				qid, compactQuery(text), ms(shift.Before), ms(shift.After), shift.At.Format("Jan 2 15:04"))
 		}
 		ch := Chain{
 			Symptom: Hop{
 				Role: "symptom",
-				Text: fmt.Sprintf("query %d (%s) slowed %.1f× — mean %s → %s per call since %s",
-					qid, compactQuery(text), ratio, ms(shift.Before), ms(shift.After), shift.At.Format("Jan 2 15:04")),
-				At: shift.At, Before: shift.Before, After: shift.After,
+				Text: symptomText,
+				At:   shift.At, Before: shift.Before, After: shift.After,
 			},
 			impact: share * ratio,
 		}
@@ -190,7 +211,7 @@ func querySlowdownChains(samples []Sample, events []model.Event) []Chain {
 				})
 				conf += 0.15
 			}
-			if ratio >= 2 && (mech.Before == 0 || mech.After/max64(mech.Before, 1e-9) >= 3) {
+			if (ratio >= 2 || zeroBaseline) && (mech.Before == 0 || mech.After/max64(mech.Before, 1e-9) >= 3) {
 				conf += 0.1 // both shifts are large, not borderline
 			}
 		}

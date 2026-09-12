@@ -61,7 +61,7 @@ func runTables(cmd *cobra.Command, args []string, f inspectFlags) error {
 	if c.Tables.DBSizeBytes > 0 {
 		dbsize = " · " + render.HumanBytes(c.Tables.DBSizeBytes) + " database"
 	}
-	fmt.Printf("%s · %s · %s%s\n\n", st.Head(host), pgVersionShort(c.Server.VersionNum),
+	fmt.Printf("%s · %s · %s%s\n\n", st.Head(host), c.Server.ShortVersion(),
 		st.Dim(fmt.Sprintf("top %d tables by size", len(c.Tables.Top))), st.Dim(dbsize))
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)

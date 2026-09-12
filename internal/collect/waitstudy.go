@@ -214,7 +214,7 @@ func blockerEvidence(in WaitStudyInput, samples []WaitSample, scrub func(string)
 			}
 			v := h.victims[e.VictimPID]
 			if v == nil {
-				v = &model.BlockedVictim{PID: e.VictimPID}
+				v = &model.BlockedVictim{PID: e.VictimPID, LockShare: round2(lockShare[e.VictimPID])}
 				h.victims[e.VictimPID] = v
 			}
 			if e.BlockedWaitS > v.MaxWaitS {

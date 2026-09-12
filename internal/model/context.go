@@ -4,7 +4,10 @@
 // stable (encoding/json preserves struct order) so --json diffs cleanly.
 package model
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Exactness labels tell a consumer how much to trust a section's numbers.
 const (
@@ -195,6 +198,32 @@ type ServerInfo struct {
 	Capabilities  []string   `json:"capabilities"` // human-readable flags that were satisfied
 	HasPgMonitor  bool       `json:"has_pg_monitor"`
 }
+
+// PGVersionString renders a server_version_num as the short "postgres MAJOR.MINOR"
+// used in report headers. It is THE one implementation — every caller (terminal,
+// advisor, tune/vacuum/queries/tables/erd headers) used to carry its own copy and
+// the pre-10 encodings drifted apart. Encoding (PG docs, Appendix of versioning
+// policy):
+//
+//	PG ≥ 10: MMmmpp  →  major=MM, minor=mm        (100004 → 10.4)
+//	PG < 10: Mmmpp   →  major=M,  minor=mm         (90603  → 9.6.3 → "9.6")
+//
+// The pre-10 minor lives at (num/100)%100 — NOT num%100, which is the patch
+// level and rendered "9.3" for a 9.6.3 server (verified bug). num==0 means
+// unknown and renders bare "postgres".
+func PGVersionString(num int) string {
+	if num == 0 {
+		return "postgres"
+	}
+	major, minor := num/10000, num%100
+	if major < 10 {
+		minor = (num / 100) % 100
+	}
+	return fmt.Sprintf("postgres %d.%d", major, minor)
+}
+
+// ShortVersion is the header form of this server's version.
+func (s ServerInfo) ShortVersion() string { return PGVersionString(s.VersionNum) }
 
 // Window describes the sampling interval and how old the underlying cumulative
 // statistics are — the latter matters because scale-to-zero serverless Postgres

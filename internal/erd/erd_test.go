@@ -262,3 +262,115 @@ func TestRenderDBInfoHeader(t *testing.T) {
 		}
 	}
 }
+
+// crossSchema is public.orders + analytics.orders with an FK into the
+// ANALYTICS one: the collision case that used to route every line to whichever
+// box registered last (bug_report.md N3). Introspect-qualified data throughout.
+func crossSchema() Schema {
+	return Schema{
+		Tables: []Table{
+			{Schema: "public", Name: "orders", Columns: []Column{
+				{Name: "id", Type: "bigint", PK: true},
+			}},
+			{Schema: "public", Name: "line_items", Columns: []Column{
+				{Name: "id", Type: "bigint", PK: true},
+				{Name: "order_id", Type: "bigint", FKTarget: "analytics.orders.id"},
+			}},
+			{Schema: "analytics", Name: "orders", Columns: []Column{
+				{Name: "id", Type: "bigint", PK: true},
+			}},
+		},
+		Edges: []Edge{
+			{FromSchema: "public", FromTable: "line_items", FromColumn: "order_id",
+				ToSchema: "analytics", ToTable: "orders", ToColumn: "id"},
+		},
+	}
+}
+
+// The routed arrow must land on the analytics.orders box — the FK's actual
+// target — not on the same-named public.orders.
+func TestRenderASCII_crossSchemaFKTargetsRightBox(t *testing.T) {
+	out := RenderASCII(crossSchema(), false)
+	lines := strings.Split(out, "\n")
+
+	var arrowLine, publicRow, analyticsRow = -1, -1, -1
+	for i, l := range lines {
+		if strings.Contains(l, "▶") {
+			arrowLine = i
+		}
+		if strings.Contains(l, "┌─ public.orders") {
+			publicRow = i
+		}
+		if strings.Contains(l, "┌─ analytics.orders") {
+			analyticsRow = i
+		}
+	}
+	if arrowLine < 0 || publicRow < 0 || analyticsRow < 0 {
+		t.Fatalf("diagram incomplete (arrow=%d public=%d analytics=%d):\n%s", arrowLine, publicRow, analyticsRow, out)
+	}
+	if arrowLine != analyticsRow {
+		t.Errorf("FK arrow must point at analytics.orders (row %d), landed on row %d (public.orders is %d):\n%s",
+			analyticsRow, arrowLine, publicRow, out)
+	}
+
+	// Duplicated bare names must DISPLAY qualified everywhere — a bare
+	// "orders" in the forest would be ambiguous about which schema it means.
+	if strings.Contains(out, " orders (order_id)") {
+		t.Errorf("duplicated table name must display schema-qualified in the forest:\n%s", out)
+	}
+	if !strings.Contains(out, "analytics.orders") {
+		t.Errorf("the analytics parent must be named:\n%s", out)
+	}
+}
+
+// Same guarantee for the row layout, the mermaid export and the HTML file:
+// each renderer keys placements by qualified identity.
+func TestRenderCrossSchemaAllLayouts(t *testing.T) {
+	s := crossSchema()
+	// Row layout: the child sits one column right of the ANALYTICS parent,
+	// not the public one — asserted via the mermaid/forest instead of pixel
+	// math, plus a determinism check per renderer.
+	if out := RenderASCIIRow(s); !strings.Contains(out, "analytics.orders") || out != RenderASCIIRow(s) {
+		t.Errorf("row layout must name and deterministically route analytics.orders:\n%s", out)
+	}
+	m := RenderMermaid(s)
+	if !strings.Contains(m, "analytics_orders") {
+		t.Errorf("mermaid must fold the qualified name into a distinct entity id:\n%s", m)
+	}
+	// Both colliding tables carry qualified ids; a bare entity block named
+	// "orders" must NOT exist (it could only mean one of the two).
+	if strings.Count(m, "analytics_orders {") != 1 || strings.Count(m, "public_orders {") != 1 {
+		t.Errorf("both colliding tables must carry distinct qualified mermaid ids:\n%s", m)
+	}
+	if strings.Contains(m, "\n    orders {") {
+		t.Errorf("a bare orders entity must not exist while the name is ambiguous:\n%s", m)
+	}
+	h := RenderHTML(s)
+	if strings.Count(h, "analytics.orders") < 2 { // box title + forest/edge target
+		t.Errorf("html must draw analytics.orders as its own box:\n%s", h)
+	}
+	if h != RenderHTML(s) {
+		t.Error("html render must stay deterministic")
+	}
+}
+
+// nameView semantics: unique names display bare, duplicated names display
+// qualified, bare resolution refuses ambiguity.
+func TestNameView(t *testing.T) {
+	nv := crossSchema().nameView()
+	if got := nv.of("public.line_items"); got != "line_items" {
+		t.Errorf("unique name must display bare, got %q", got)
+	}
+	if got := nv.of("public.orders"); got != "public.orders" {
+		t.Errorf("duplicated name must display qualified, got %q", got)
+	}
+	if q, ok := nv.resolve("orders"); ok {
+		t.Errorf("a bare reference to a duplicated name must not resolve, got %q", q)
+	}
+	if q, ok := nv.resolve("analytics.orders"); !ok || q != "analytics.orders" {
+		t.Errorf("qualified reference must resolve to itself, got %q %v", q, ok)
+	}
+	if q, ok := nv.resolve("line_items"); !ok || q != "public.line_items" {
+		t.Errorf("unique bare reference must resolve, got %q %v", q, ok)
+	}
+}

@@ -87,7 +87,7 @@ func runVacuum(cmd *cobra.Command, args []string, f inspectFlags) error {
 	if behind > 0 {
 		summary = st.Warn(fmt.Sprintf("%d table(s) past the autovacuum threshold", behind))
 	}
-	fmt.Printf("%s · %s · %s\n\n", st.Head(host), pgVersionShort(c.Server.VersionNum), summary)
+	fmt.Printf("%s · %s · %s\n\n", st.Head(host), c.Server.ShortVersion(), summary)
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "  table\tlive\tdead\tdead%\tlast autovacuum\tdue?")
@@ -150,15 +150,15 @@ func settingFloat(c *model.Context, name string, def float64) float64 {
 	return def
 }
 
-// agoStr renders how long ago a timestamp was, or "never" if unset.
+// agoStr renders how long ago a timestamp was, or "never" if unset. A future
+// timestamp (clock skew between pgbot and the server) reads as "just now" —
+// the same case d < time.Minute already covers, so there is no separate arm.
 func agoStr(t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return "never"
 	}
 	d := time.Since(*t)
 	switch {
-	case d < 0:
-		return "just now"
 	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:

@@ -1,8 +1,9 @@
 package model
 
 // WaitsSchemaVersion versions the `pgbot waits --json` document, independently
-// of the Context schema — same policy as advise and why.
-const WaitsSchemaVersion = "1.0.0"
+// of the Context schema — same policy as advise and why. 1.1.0: BlockedVictim
+// gained LockShare (the victim's own sampled-time fraction, additive).
+const WaitsSchemaVersion = "1.1.0"
 
 // WaitStudy is the result of one bounded wait-sampling window: where database
 // time went, who was blocking whom, and exactly how much evidence backs each
@@ -70,4 +71,9 @@ type BlockedVictim struct {
 	Query     string  `json:"query,omitempty"`
 	WaitEvent string  `json:"wait_event,omitempty"`
 	MaxWaitS  float64 `json:"max_wait_s"` // exact, from query_start
+	// LockShare is the fraction of THIS victim's OWN sampled time spent in the
+	// Lock wait class (fast-plane per-PID corroboration). It is NOT the victim's
+	// share of the whole window — the two agree only when the victim was sampled
+	// nowhere else. 1.1.0.
+	LockShare float64 `json:"lock_share,omitempty"`
 }
