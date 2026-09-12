@@ -185,7 +185,7 @@ func renderWaits(s *model.WaitStudy, group waitsGroup, target *conn.Target, f wa
 
 	for _, b := range s.Blockers {
 		fmt.Println(st.Head("Blocked → blocker (sustained evidence)"))
-		renderBlocker(st, b, s)
+		renderBlocker(st, b)
 	}
 	if len(s.Transient) > 0 {
 		fmt.Println(st.Dim(fmt.Sprintf("transient lock waits: %d holder(s) seen too briefly to name as a cause", len(s.Transient))))
@@ -258,11 +258,16 @@ func renderTopSessions(st render.Styler, s *model.WaitStudy) {
 	fmt.Println()
 }
 
-func renderBlocker(st render.Styler, b model.Blocker, s *model.WaitStudy) {
+func renderBlocker(st render.Styler, b model.Blocker) {
 	for _, v := range b.Victims {
 		fmt.Printf("  PID %d  %s\n", v.PID, truncStr(v.Query, 70))
-		if share := victimLockShareOf(s, v.PID); share > 0 {
-			fmt.Printf("    ~%.0f%% of its sampled time in Lock:%s\n", share*100, v.WaitEvent)
+		// LockShare is the victim's OWN sampled-time fraction (model 1.1.0):
+		// "~100% of its sampled time in Lock:relation" for a backend that was
+		// blocked every time it was seen. The old code printed the victim's share
+		// of the whole window here — 20% for a backend blocked in 40 of 200 window
+		// samples — mislabeled as "of its sampled time" (bug_report.md Bug 5).
+		if v.LockShare > 0 {
+			fmt.Printf("    ~%.0f%% of its sampled time in Lock:%s\n", v.LockShare*100, v.WaitEvent)
 		}
 	}
 	holder := fmt.Sprintf("blocked by PID %d (%s, xact age %.0fs", b.HolderPID, b.HolderState, b.HolderXactAgeS)
@@ -274,15 +279,6 @@ func renderBlocker(st render.Styler, b model.Blocker, s *model.WaitStudy) {
 		fmt.Printf("      holder's last query: %s\n", st.Dim(truncStr(b.HolderQuery, 70)))
 	}
 	fmt.Println()
-}
-
-func victimLockShareOf(s *model.WaitStudy, pid int) float64 {
-	for _, sess := range s.Sessions {
-		if sess.PID == pid && sess.Count > 0 && strings.HasPrefix(sess.TopEvent, "Lock:") {
-			return sess.Share
-		}
-	}
-	return 0
 }
 
 // waitsConclusion is the evidence-gated bottom line. It never claims exact
