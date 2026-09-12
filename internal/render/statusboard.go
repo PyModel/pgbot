@@ -73,7 +73,12 @@ func padC(s string, w int) string {
 
 // buildBoard derives the subsystem rows from the Context. A row's status is
 // taken from the finding that governs it (so "locks" reads fail when a blocking
-// chain fired), else ok.
+// chain fired), else ok. Every row whose subsystem has findings MUST be routed
+// through statusFor with the FULL governing list — the same lists the "checked"
+// line uses below — so the board can never read "ok" over a finding on the same
+// screen (regression: replication/settings/checkpoints/WAL were hardcoded ok and
+// contradicted CRITICAL findings; the wraparound row missed mxid_wraparound and
+// the indexes row missed fk_unindexed/redundant_indexes).
 func buildBoard(c *model.Context) []boardRow {
 	sev := map[string]string{}
 	for _, f := range c.Findings {
@@ -99,7 +104,9 @@ func buildBoard(c *model.Context) []boardRow {
 			note = fmt.Sprintf("%d idle in txn", c.Activity.IdleInTransaction)
 		}
 		connVal := fmt.Sprintf("%d", h.Connections)
-		connStatus, connKind := statusFor("connection_saturation")
+		connStatus, connKind := statusFor(
+			"connection_saturation", "connections_overprovisioned", "idle_in_transaction",
+			"long_running_transaction", "prepared_xact_abandoned")
 		if c.Limits != nil && c.Limits.ConnectionsMax > 0 {
 			connVal = fmt.Sprintf("%d/%d", c.Limits.ConnectionsUsed, c.Limits.ConnectionsMax)
 		}
@@ -138,7 +145,7 @@ func buildBoard(c *model.Context) []boardRow {
 		rows = append(rows, boardRow{"locks", s, k, val, note})
 	}
 	if c.Indexes != nil {
-		s, k := statusFor("unused_indexes", "index_invalid")
+		s, k := statusFor("unused_indexes", "index_invalid", "redundant_indexes", "fk_unindexed")
 		var total int64
 		for _, ix := range c.Indexes.Unused {
 			total += ix.Bytes
@@ -155,7 +162,7 @@ func buildBoard(c *model.Context) []boardRow {
 		rows = append(rows, boardRow{"tables", s, k, HumanBytes(c.Tables.DBSizeBytes), fmt.Sprintf("%d tracked", len(c.Tables.Top))})
 	}
 	if c.Limits != nil && c.Limits.Exactness != model.ExactnessUnavailable {
-		s, k := statusFor("txid_wraparound")
+		s, k := statusFor("txid_wraparound", "mxid_wraparound", "sequence_exhaustion")
 		note := "of 2.1B max"
 		if k == kOK {
 			note = "no wraparound risk"
@@ -163,14 +170,19 @@ func buildBoard(c *model.Context) []boardRow {
 		rows = append(rows, boardRow{"wraparound", s, k, humanNum(float64(c.Limits.MaxXIDAge)), note})
 	}
 	if w := c.WAL; w != nil && w.BytesPerSec != nil {
-		rows = append(rows, boardRow{"WAL", "ok", kOK, HumanBytes(int64(*w.BytesPerSec)) + "/s", ""})
+		// The WAL row covers the whole archiving pipeline: a failing or stalled
+		// archiver (or archiving deliberately off) is the finding that governs
+		// WAL health, and both can be CRITICAL.
+		s, k := statusFor("archiving_failing", "archiving_stalled", "archiving_disabled")
+		rows = append(rows, boardRow{"WAL", s, k, HumanBytes(int64(*w.BytesPerSec)) + "/s", ""})
 	}
 	if c.IO != nil {
 		note := "none forced"
 		if c.IO.CheckpointsReq > 0 {
 			note = fmt.Sprintf("%d forced", c.IO.CheckpointsReq)
 		}
-		rows = append(rows, boardRow{"checkpoints", "ok", kOK, "timed", note})
+		s, k := statusFor("checkpoints_forced")
+		rows = append(rows, boardRow{"checkpoints", s, k, "timed", note})
 	}
 	if r := c.Replication; r != nil {
 		val, note := "none", ""
@@ -184,10 +196,18 @@ func buildBoard(c *model.Context) []boardRow {
 			val = fmt.Sprintf("%d up", len(r.Replicas))
 			note = "streaming"
 		}
-		rows = append(rows, boardRow{"replication", "ok", kOK, val, note})
+		s, k := statusFor(
+			"sync_rep_degraded", "replica_lag_time", "recovery_conflicts",
+			"replica_disconnected", "replication_slot_inactive", "subscription_worker_down")
+		rows = append(rows, boardRow{"replication", s, k, val, note})
 	}
 	if c.Settings != nil {
-		rows = append(rows, boardRow{"settings", "ok", kOK, fmt.Sprintf("%d non-default", len(c.Settings.Overrides)), ""})
+		s, k := statusFor(
+			"work_mem_low", "fsync_off", "full_page_writes_off", "autovacuum_off",
+			"random_page_cost_high", "work_mem_overcommit", "statement_timeout_unset",
+			"io_timing_off", "checksums_disabled", "ignore_checksum_failure_on",
+			"io_concurrency_low", "plan_cache_mode_forced", "slot_wal_keep_unbounded")
+		rows = append(rows, boardRow{"settings", s, k, fmt.Sprintf("%d non-default", len(c.Settings.Overrides)), ""})
 	}
 	return rows
 }
