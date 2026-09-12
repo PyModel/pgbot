@@ -1805,7 +1805,8 @@ func walArchiving(c *model.Context, add func(model.Finding)) {
 	// archiving_stalled: mode on, WAL flowing, nothing archived recently.
 	if (archiveMode == "on" || archiveMode == "always") && !failing {
 		walFlowing := c.WAL != nil && c.WAL.BytesPerSec != nil && *c.WAL.BytesPerSec > 0
-		if walFlowing && a.LastArchivedTime != nil && time.Since(*a.LastArchivedTime) > archiveStallThreshold(c) {
+		threshold := archiveStallThreshold(c)
+		if walFlowing && a.LastArchivedTime != nil && time.Since(*a.LastArchivedTime) > threshold {
 			age := int64(time.Since(*a.LastArchivedTime).Seconds())
 			f := model.Finding{
 				ID: "archiving_stalled", Severity: sev(model.SeverityCritical),
@@ -1821,6 +1822,39 @@ func walArchiving(c *model.Context, add func(model.Finding)) {
 			}
 			crossLinkWAL(c, &f)
 			add(f)
+		}
+
+		// Never-archived server: last_archived_time is NULL and no failure is
+		// recorded — exactly the signature of an archive_command that HANGS
+		// (a dead NFS mount, a stalled TCP peer: the command never RETURNS) rather
+		// than fails. Neither arm above can fire in that state — failing needs a
+		// failure signal, stalled needs a success timestamp — while WAL keeps
+		// flowing, pg_wal fills, and PITR has silently never worked. The only
+		// honest clock for "never" is how long the state has been observable:
+		// server uptime, gated so (a) a server younger than the threshold hasn't
+		// had time to archive yet, and (b) a recent pg_stat_reset() (which also
+		// NULLs last_archived_time) can't be misread as "never archived".
+		if walFlowing && a.LastArchivedTime == nil && c.Server.UptimeSeconds >= int64(threshold.Seconds()) {
+			if c.Window.StatsResetAt == nil || time.Since(*c.Window.StatsResetAt) > threshold {
+				f := model.Finding{
+					ID: "archiving_stalled", Severity: sev(model.SeverityCritical),
+					Title:  "WAL archiving has never succeeded — not one segment archived while WAL is being written",
+					Detail: "archive_mode is on, WAL is being generated, and last_archived_time is NULL with no archiving failure recorded — the shape of an archive_command that HANGS rather than returns (a dead mount or a stalled network peer). Unarchived WAL can't be recycled, so recovery has never had a complete point to restore to and pg_wal keeps growing.",
+					Evidence: []string{
+						fmt.Sprintf("server up %s; zero segments archived (pg_stat_archiver.last_archived_time is NULL)", shortDur(c.Server.UptimeSeconds)),
+						fmt.Sprintf("failed_count=%d (a command that never returns updates nothing)", a.FailedCount),
+						fmt.Sprintf("archive_timeout=%s; WAL flowing at %s/s", orUnknownSetting(settingParam(c, "archive_timeout")), humanBytes(int64(*c.WAL.BytesPerSec))),
+					},
+					Remediation: "Run the exact archive_command from postgresql.conf by hand as the postgres user against a live segment — a command that hangs instead of failing never increments the counters this finding normally keys on. Check the target mount/network, then restart the archiver by fixing the command (PostgreSQL retries the oldest segment forever).",
+					Impact:      impact(model.DimRisk, 90, "archiving never succeeded", "last_archived_time NULL + WAL flowing for longer than max(archive_timeout×3, 1h)"),
+					Confidence:  0.75,
+				}
+				if managed {
+					f.Caveats = append(f.Caveats, managedNote)
+				}
+				crossLinkWAL(c, &f)
+				add(f)
+			}
 		}
 	}
 
