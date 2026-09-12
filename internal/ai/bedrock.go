@@ -88,6 +88,15 @@ func bedrockModel(model, base, key string, httpc *http.Client) (LanguageModel, e
 		}
 	}
 	base = trimURL(base)
+	if httpc == nil {
+		httpc = &http.Client{Timeout: 3 * time.Minute}
+	}
+	// Never mutate the caller's client: Bedrock pins redirects off and may
+	// wrap the transport with its signer — on a shared client those changes
+	// would leak into every later call. A shallow copy is enough (only
+	// CheckRedirect and Transport are assigned below, both fields of the copy).
+	hc := *httpc
+	httpc = &hc
 	// Never forward a supplied or minted bearer token through a redirect.
 	httpc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	if key == "" {

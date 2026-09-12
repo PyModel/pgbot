@@ -82,6 +82,15 @@ func runLogs(cmd *cobra.Command, args []string, f logsFlags) error {
 		defer cancel()
 	}
 
+	// Capture the moment pgbot started connecting: its own "connection
+	// authenticated" lines (which name neither PID nor application_name, only
+	// the identity) can only be dropped when the entry is AT OR AFTER this
+	// moment. Entries before it are provably not pgbot's — they belong to other
+	// clients of the same role, and dropping them destroyed evidence.
+	// A small skew guard absorbs client-vs-server clock drift conservatively:
+	// if in doubt, KEEP the line (a false kept line is noise; a false drop is
+	// lost evidence).
+	selfSince := time.Now()
 	target, err := conn.Connect(ctx, connString)
 	if err != nil {
 		return err
@@ -103,7 +112,7 @@ func runLogs(cmd *cobra.Command, args []string, f logsFlags) error {
 		for _, pid := range target.SelfPIDs() {
 			own[int(pid)] = true
 		}
-		return !isSelfLogEntryForUser(e, own, connUser) && levels[e.Level]
+		return !isSelfLogEntryForUser(e, own, connUser, selfSince) && levels[e.Level]
 	}
 
 	src, err := pglog.NewSQLSource(ctx, target.Pool)
@@ -187,14 +196,27 @@ func isSelfLogEntry(e pglog.Entry, ownPIDs map[int]bool) bool {
 
 // isSelfLogEntryForUser additionally drops the authenticated-phase line for
 // pgbot's own role — the one connection line that names neither PID context
-// nor application_name, only the identity.
-func isSelfLogEntryForUser(e pglog.Entry, ownPIDs map[int]bool, user string) bool {
+// nor application_name, only the identity. It cannot be attributed precisely,
+// so it is dropped ONLY when the entry timestamp proves it can be pgbot's:
+// at/after pgbot's own session start (minus a clock-skew guard), when the
+// entry predates pgbot entirely it is another client's evidence and stays.
+func isSelfLogEntryForUser(e pglog.Entry, ownPIDs map[int]bool, user string, selfSince time.Time) bool {
 	if isSelfLogEntry(e, ownPIDs) {
 		return true
 	}
-	return user != "" &&
-		strings.HasPrefix(e.Message, "connection authenticated: ") &&
-		strings.Contains(e.Message, `identity="`+user+`"`)
+	if user == "" || selfSince.IsZero() {
+		return false // no identity / no session clock: never drop on a guess
+	}
+	if !strings.HasPrefix(e.Message, "connection authenticated: ") {
+		return false
+	}
+	if !strings.Contains(e.Message, `identity="`+user+`"`) {
+		return false
+	}
+	// Only entries comfortably after pgbot started can be its own; the guard
+	// errs toward KEEPING lines when the clocks disagree.
+	const skewGuard = 2 * time.Minute
+	return e.Time.After(selfSince.Add(skewGuard))
 }
 
 // queryLoggingNote explains an all-noise stream: with log_min_duration_statement
