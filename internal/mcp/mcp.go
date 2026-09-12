@@ -86,6 +86,31 @@ type rpcError struct {
 // defaultProtocol is the MCP revision we advertise when a client doesn't pin one.
 const defaultProtocol = "2024-11-05"
 
+// responder is the single reply channel for one request. It enforces the
+// JSON-RPC 2.0 rule that a Notification — a request whose id member is absent —
+// is NEVER answered, not even with an error (§5.1: "The Server MUST NOT reply to
+// a Notification, including those that are unhandled"). Every handler funnels
+// through it, so a future method (or an error path) cannot regress the rule the
+// way scattered writeResult/writeErr calls could — a notification-form reply
+// carries "id": null and makes strict clients drop the whole session.
+type responder struct {
+	w      io.Writer
+	id     json.RawMessage
+	notify bool // true when the request carried no id: process, never answer
+}
+
+func (r responder) result(v any) {
+	if !r.notify {
+		writeResult(r.w, r.id, v)
+	}
+}
+
+func (r responder) errf(code int, msg string) {
+	if !r.notify {
+		writeErr(r.w, r.id, code, msg)
+	}
+}
+
 // Serve runs the read-dispatch-write loop until stdin closes. Messages are one
 // JSON object per line; responses go to out. Nothing but protocol goes to out —
 // callers must log to stderr.
@@ -114,7 +139,7 @@ func (s *Server) dispatch(ctx context.Context, raw []byte, w io.Writer, proto *s
 		writeErr(w, nil, -32700, "parse error")
 		return
 	}
-	isNotification := len(req.ID) == 0
+	rep := responder{w: w, id: req.ID, notify: len(req.ID) == 0}
 
 	switch req.Method {
 	case "initialize":
@@ -132,7 +157,7 @@ func (s *Server) dispatch(ctx context.Context, raw []byte, w io.Writer, proto *s
 		if len(s.Resources) > 0 {
 			caps["resources"] = map[string]any{}
 		}
-		writeResult(w, req.ID, map[string]any{
+		rep.result(map[string]any{
 			"protocolVersion": *proto,
 			"capabilities":    caps,
 			"serverInfo":      map[string]any{"name": s.Name, "version": s.Version},
@@ -140,32 +165,33 @@ func (s *Server) dispatch(ctx context.Context, raw []byte, w io.Writer, proto *s
 		})
 
 	case "notifications/initialized", "notifications/cancelled":
-		// notifications: no reply
+		// notifications: no reply (all notification methods funnel through rep,
+		// which enforces that regardless of the arm they land in)
 
 	case "ping":
-		writeResult(w, req.ID, map[string]any{})
+		rep.result(map[string]any{})
 
 	case "tools/list":
-		writeResult(w, req.ID, map[string]any{"tools": s.toolDescriptors()})
+		rep.result(map[string]any{"tools": s.toolDescriptors()})
 
 	case "tools/call":
-		s.callTool(ctx, req, w)
+		s.callTool(ctx, req, rep)
 
 	case "prompts/list":
-		writeResult(w, req.ID, map[string]any{"prompts": s.promptDescriptors()})
+		rep.result(map[string]any{"prompts": s.promptDescriptors()})
 
 	case "prompts/get":
-		s.getPrompt(ctx, req, w)
+		s.getPrompt(ctx, req, rep)
 
 	case "resources/list":
-		writeResult(w, req.ID, map[string]any{"resources": s.resourceDescriptors()})
+		rep.result(map[string]any{"resources": s.resourceDescriptors()})
 
 	case "resources/read":
-		s.readResource(ctx, req, w)
+		s.readResource(ctx, req, rep)
 
 	default:
-		if !isNotification {
-			writeErr(w, req.ID, -32601, "method not found: "+req.Method)
+		if !rep.notify {
+			rep.errf(-32601, "method not found: "+req.Method)
 		}
 	}
 }
@@ -186,13 +212,13 @@ func (s *Server) toolDescriptors() []map[string]any {
 	return out
 }
 
-func (s *Server) callTool(ctx context.Context, req rpcRequest, w io.Writer) {
+func (s *Server) callTool(ctx context.Context, req rpcRequest, rep responder) {
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		writeErr(w, req.ID, -32602, "invalid params")
+		rep.errf(-32602, "invalid params")
 		return
 	}
 	var tool *Tool
@@ -203,17 +229,17 @@ func (s *Server) callTool(ctx context.Context, req rpcRequest, w io.Writer) {
 		}
 	}
 	if tool == nil {
-		writeErr(w, req.ID, -32602, "unknown tool: "+p.Name)
+		rep.errf(-32602, "unknown tool: "+p.Name)
 		return
 	}
 	// A tool failure is reported as a tool result with isError=true (the model
 	// sees it), NOT a JSON-RPC error — the session keeps going.
 	text, err := tool.Handler(ctx, p.Arguments)
 	if err != nil {
-		writeResult(w, req.ID, toolResult("error: "+err.Error(), true))
+		rep.result(toolResult("error: "+err.Error(), true))
 		return
 	}
-	writeResult(w, req.ID, toolResult(text, false))
+	rep.result(toolResult(text, false))
 }
 
 func (s *Server) promptDescriptors() []map[string]any {
@@ -228,13 +254,13 @@ func (s *Server) promptDescriptors() []map[string]any {
 	return out
 }
 
-func (s *Server) getPrompt(ctx context.Context, req rpcRequest, w io.Writer) {
+func (s *Server) getPrompt(ctx context.Context, req rpcRequest, rep responder) {
 	var p struct {
 		Name      string            `json:"name"`
 		Arguments map[string]string `json:"arguments"`
 	}
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		writeErr(w, req.ID, -32602, "invalid params")
+		rep.errf(-32602, "invalid params")
 		return
 	}
 	var prompt *Prompt
@@ -245,12 +271,12 @@ func (s *Server) getPrompt(ctx context.Context, req rpcRequest, w io.Writer) {
 		}
 	}
 	if prompt == nil {
-		writeErr(w, req.ID, -32602, "unknown prompt: "+p.Name)
+		rep.errf(-32602, "unknown prompt: "+p.Name)
 		return
 	}
 	msgs, err := prompt.Build(ctx, p.Arguments)
 	if err != nil {
-		writeErr(w, req.ID, -32603, err.Error())
+		rep.errf(-32603, err.Error())
 		return
 	}
 	rendered := make([]map[string]any, 0, len(msgs))
@@ -264,7 +290,7 @@ func (s *Server) getPrompt(ctx context.Context, req rpcRequest, w io.Writer) {
 			"content": map[string]any{"type": "text", "text": m.Text},
 		})
 	}
-	writeResult(w, req.ID, map[string]any{"description": prompt.Description, "messages": rendered})
+	rep.result(map[string]any{"description": prompt.Description, "messages": rendered})
 }
 
 func (s *Server) resourceDescriptors() []map[string]any {
@@ -275,12 +301,12 @@ func (s *Server) resourceDescriptors() []map[string]any {
 	return out
 }
 
-func (s *Server) readResource(ctx context.Context, req rpcRequest, w io.Writer) {
+func (s *Server) readResource(ctx context.Context, req rpcRequest, rep responder) {
 	var p struct {
 		URI string `json:"uri"`
 	}
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		writeErr(w, req.ID, -32602, "invalid params")
+		rep.errf(-32602, "invalid params")
 		return
 	}
 	var res *Resource
@@ -291,19 +317,19 @@ func (s *Server) readResource(ctx context.Context, req rpcRequest, w io.Writer) 
 		}
 	}
 	if res == nil {
-		writeErr(w, req.ID, -32602, "unknown resource: "+p.URI)
+		rep.errf(-32602, "unknown resource: "+p.URI)
 		return
 	}
 	text, err := res.Read(ctx)
 	if err != nil {
-		writeErr(w, req.ID, -32603, err.Error())
+		rep.errf(-32603, err.Error())
 		return
 	}
 	mime := res.MimeType
 	if mime == "" {
 		mime = "text/plain"
 	}
-	writeResult(w, req.ID, map[string]any{
+	rep.result(map[string]any{
 		"contents": []map[string]any{{"uri": res.URI, "mimeType": mime, "text": text}},
 	})
 }
@@ -315,6 +341,8 @@ func toolResult(text string, isErr bool) map[string]any {
 	}
 }
 
+// writeResult/writeErr are the wire writers; the notification guard lives in
+// responder, which is the only caller that should reach them for a request.
 func writeResult(w io.Writer, id json.RawMessage, result any) {
 	writeMessage(w, rpcResponse{JSONRPC: "2.0", ID: idOrNull(id), Result: result})
 }
